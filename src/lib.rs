@@ -1041,11 +1041,95 @@ impl Cmd {
     /// Other builder methods have no effect on the command returned since they control how the
     /// command is run, but this method does not yet execute the command.
     pub fn to_command(&self) -> Command {
-        let mut result = Command::new(&self.prog);
+        let program = self.resolve_program();
+        let mut result = Command::new(&program);
         result.current_dir(&self.sh.cwd);
         result.args(&self.args);
         result.envs(&*self.sh.env);
         result
+    }
+
+    #[cfg(not(windows))]
+    fn resolve_program(&self) -> OsString {
+        self.prog.as_os_str().into()
+    }
+
+    #[cfg(windows)]
+    fn resolve_program(&self) -> OsString {
+        if self.prog.extension().is_some() {
+            // fast path for explicit extension
+            return self.prog.as_os_str().into();
+        }
+
+        // mimics `search_paths` behavior:
+        // https://github.com/rust-lang/rust/blob/051478957371ee0084a7c0913941d2a8c4757bb9/library/std/src/sys/pal/windows/process.rs#L482
+
+        const ENV_PATH: &str = "PATH";
+
+        // 1. Child paths
+        let paths = self
+            .sh
+            .env
+            .iter()
+            .filter_map(|(name, value)| {
+                if name.eq_ignore_ascii_case(ENV_PATH) {
+                    Some(value.as_ref())
+                } else {
+                    None
+                }
+            })
+            .last();
+
+        if let Some(program_path) = self.find_in_paths(paths) {
+            return program_path;
+        }
+
+        // 2. Application path
+        let paths = env::current_exe().ok().map(|mut path| {
+            path.pop();
+            OsString::from(path)
+        });
+
+        if let Some(program_path) = self.find_in_paths(map_os_str(&paths)) {
+            return program_path;
+        }
+
+        // 3 & 4. System paths
+        // Sort of compromise: use %SystemRoot% to avoid adding an additional dependency on the `windows` crate.
+        // Usually %SystemRoot% expands to 'C:\WINDOWS' and 'C:\WINDOWS\SYSTEM32' exists in `PATH`,
+        // so the compromise covers both `GetSystemDirectoryW` and `GetWindowsDirectoryW` cases.
+        let paths = self.sh.var_os("SystemRoot");
+        if let Some(program_path) = self.find_in_paths(map_os_str(&paths)) {
+            return program_path;
+        }
+
+        // 5. Parent paths
+        let paths = self.sh.var_os(ENV_PATH);
+        if let Some(program_path) = self.find_in_paths(map_os_str(&paths)) {
+            return program_path;
+        }
+
+        return self.prog.as_os_str().into();
+
+        fn map_os_str(value: &Option<OsString>) -> Option<&OsStr> {
+            value.as_ref().map(|p| p.as_os_str())
+        }
+    }
+
+    #[cfg(windows)]
+    fn find_in_paths(&self, paths: Option<&OsStr>) -> Option<OsString> {
+        paths.and_then(|paths| {
+            for folder in env::split_paths(&paths).filter(|p| !p.as_os_str().is_empty()) {
+                for ext in ["cmd", "bat"] {
+                    let path = folder.join(self.prog.with_extension(ext));
+                    if std::fs::metadata(&path).is_ok() {
+                        return Some(path.into_os_string());
+                    }
+                }
+            }
+
+            None
+        })
     }
 }
 
