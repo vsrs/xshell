@@ -1050,8 +1050,8 @@ impl Cmd {
     }
 
     #[cfg(not(windows))]
-    fn resolve_program(&self) -> OsString {
-        self.prog.as_os_str().into()
+    fn resolve_program(&self) -> &OsStr {
+        self.prog.as_os_str()
     }
 
     #[cfg(windows)]
